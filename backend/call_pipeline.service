@@ -1,0 +1,29 @@
+[Unit]
+Description=Call Processing Pipeline Service
+# This service will start after the network is available.
+After=network.target
+
+[Service]
+# The user that will run the script.
+# It's recommended to run this as a non-root user ('op' in this case).
+# Make sure this user has the necessary permissions to read/write the watch, output, and error directories.
+User=op
+
+# The command to execute.
+# Replace '/path/to/backend/process_calls.py' with the actual absolute path to the script on your server.
+ExecStart=/usr/bin/python3 /path/to/backend/process_calls.py
+
+# The working directory for the script.
+# Replace '/path/to/backend' with the actual absolute path to the directory containing the script.
+WorkingDirectory=/path/to/backend
+
+# Restart the service automatically if it fails.
+Restart=always
+
+# Standard output and error are sent to journald, which can be viewed with 'journalctl -u call_pipeline.service'.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+# This service will be enabled for the multi-user target, which is the default for servers.
+WantedBy=multi-user.target
