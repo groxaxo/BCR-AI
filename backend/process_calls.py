@@ -8,27 +8,30 @@ import openai
 import logging
 
 # --- Configuration ---
-# Directory to watch for incoming call recordings.
-# This should match the DEST_DIR in the push_recording.sh script.
+# General settings
 WATCH_DIR = "/path/to/server/incoming-calls"
-
-# Directory to store the processed JSON files.
 OUTPUT_DIR = "/path/to/server/processed"
-
-# Directory to log errors.
 ERROR_DIR = "/path/to/server/errors"
 
-# API endpoint for the self-hosted Whisper model.
-# The default port is 9000 for the Docker container provided in the README.
-WHISPER_API_BASE = "http://localhost:9000/v1"
-WHISPER_API_KEY = "dummy"  # API key is not strictly required for local instances.
-WHISPER_MODEL = "large-v3" # The model to use for transcription.
+# --- Provider Selection ---
+# Choose 'self-hosted' or 'openai' for transcription and summarization.
+TRANSCRIPTION_PROVIDER = "self-hosted"  # 'self-hosted' or 'openai'
+SUMMARIZATION_PROVIDER = "self-hosted"  # 'self-hosted' or 'openai'
 
-# API endpoint for the self-hosted vLLM.
-# Replace with the actual URL of your vLLM service.
-VLLM_API_BASE = "http://your_vllm_host:8000/v1"
-VLLM_API_KEY = "dummy" # Use a real key if your service is protected.
-VLLM_MODEL = "your-llm-model" # The model to use for summarization.
+# --- API Credentials and Models ---
+# OpenAI API Settings (used if 'openai' is selected as a provider)
+OPENAI_API_KEY = "sk-your-openai-api-key"
+OPENAI_WHISPER_MODEL = "whisper-1"         # e.g., 'whisper-1'
+OPENAI_LLM_MODEL = "gpt-4-turbo-preview"  # e.g., 'gpt-4-turbo-preview'
+
+# Self-Hosted API Settings (used if 'self-hosted' is selected)
+# URL for the self-hosted Whisper-compatible API server
+SELF_HOSTED_WHISPER_API_BASE = "http://localhost:9000/v1"
+SELF_HOSTED_WHISPER_MODEL = "large-v3"
+
+# URL for the self-hosted vLLM or other OpenAI-compatible API server
+SELF_HOSTED_LLM_API_BASE = "http://localhost:8000/v1"
+SELF_HOSTED_LLM_MODEL = "your-local-llm-model"
 
 # --- Logging Setup ---
 logging.basicConfig(level=logging.INFO,
@@ -36,40 +39,48 @@ logging.basicConfig(level=logging.INFO,
                     datefmt='%Y-%m-%d %H:%M:%S')
 
 # --- Main Application ---
-# Initialize API clients
-try:
-    openai_whisper = openai.OpenAI(base_url=WHISPER_API_BASE, api_key=WHISPER_API_KEY)
-    openai_vllm = openai.OpenAI(base_url=VLLM_API_BASE, api_key=VLLM_API_KEY)
-except Exception as e:
-    logging.error(f"Failed to initialize OpenAI clients: {e}")
-    # Exit if clients can't be initialized, as the script can't function.
-    exit(1)
+def initialize_clients():
+    """Initializes the API clients based on the selected providers."""
+    global openai_whisper, whisper_model, openai_llm, llm_model
 
+    # --- Transcription Client ---
+    if TRANSCRIPTION_PROVIDER == 'openai':
+        logging.info("Using OpenAI API for transcription.")
+        openai_whisper = openai.OpenAI(api_key=OPENAI_API_KEY)
+        whisper_model = OPENAI_WHISPER_MODEL
+    elif TRANSCRIPTION_PROVIDER == 'self-hosted':
+        logging.info("Using self-hosted API for transcription.")
+        openai_whisper = openai.OpenAI(base_url=SELF_HOSTED_WHISPER_API_BASE, api_key="dummy")
+        whisper_model = SELF_HOSTED_WHISPER_MODEL
+    else:
+        logging.error(f"Invalid TRANSCRIPTION_PROVIDER: {TRANSCRIPTION_PROVIDER}")
+        exit(1)
+
+    # --- Summarization Client ---
+    if SUMMARIZATION_PROVIDER == 'openai':
+        logging.info("Using OpenAI API for summarization.")
+        openai_llm = openai.OpenAI(api_key=OPENAI_API_KEY)
+        llm_model = OPENAI_LLM_MODEL
+    elif SUMMARIZATION_PROVIDER == 'self-hosted':
+        logging.info("Using self-hosted API for summarization.")
+        openai_llm = openai.OpenAI(base_url=SELF_HOSTED_LLM_API_BASE, api_key="dummy")
+        llm_model = SELF_HOSTED_LLM_MODEL
+    else:
+        logging.error(f"Invalid SUMMARIZATION_PROVIDER: {SUMMARIZATION_PROVIDER}")
+        exit(1)
 
 class CallHandler(FileSystemEventHandler):
-    """
-    Handles file system events for new call recordings.
-    """
+    """Handles file system events for new call recordings."""
     def on_created(self, event):
-        """
-        Called when a file or directory is created.
-        """
         if event.is_directory:
             return
-
-        # Wait a moment to ensure the file is fully written
-        time.sleep(2)
-
+        time.sleep(2)  # Wait for the file to be fully written
         filepath = event.src_path
         logging.info(f"New file detected: {filepath}")
         process_audio(filepath)
 
-
 def preprocess_audio(input_path):
-    """
-    Converts the input audio file to a 16kHz mono WAV file using ffmpeg.
-    Whisper performs best with WAV files in this format.
-    """
+    """Converts the input audio file to a 16kHz mono WAV file using ffmpeg."""
     output_path = os.path.splitext(input_path)[0] + ".wav"
     try:
         cmd = ["ffmpeg", "-y", "-i", input_path,
@@ -81,16 +92,8 @@ def preprocess_audio(input_path):
         logging.error(f"ffmpeg failed for {input_path}: {e.stderr}")
         return None
 
-
 def process_audio(filepath):
-    """
-    The main processing pipeline for a single audio file.
-    1. Preprocesses the audio file.
-    2. Transcribes the audio using Whisper.
-    3. Summarizes the transcript using a vLLM.
-    4. Saves the results to a JSON file.
-    5. Cleans up the original and temporary files.
-    """
+    """The main processing pipeline for a single audio file."""
     wav_file = None
     try:
         # 1. Preprocess audio
@@ -99,19 +102,19 @@ def process_audio(filepath):
             raise ValueError("Audio preprocessing failed.")
 
         # 2. Transcribe audio
-        logging.info(f"Transcribing {wav_file} with Whisper ({WHISPER_MODEL})...")
+        logging.info(f"Transcribing {wav_file} with {TRANSCRIPTION_PROVIDER} ({whisper_model})...")
         with open(wav_file, "rb") as f:
             transcription_text = openai_whisper.audio.transcriptions.create(
-                model=WHISPER_MODEL,
+                model=whisper_model,
                 file=f,
                 response_format="text"
             )
         logging.info("Transcription successful.")
 
         # 3. Summarize transcript
-        logging.info(f"Summarizing transcript with vLLM ({VLLM_MODEL})...")
-        chat_completion = openai_vllm.chat.completions.create(
-            model=VLLM_MODEL,
+        logging.info(f"Summarizing transcript with {SUMMARIZATION_PROVIDER} ({llm_model})...")
+        chat_completion = openai_llm.chat.completions.create(
+            model=llm_model,
             messages=[
                 {"role": "system", "content": "Summarize the following call transcript and extract key points, action items, and entities discussed."},
                 {"role": "user", "content": transcription_text}
@@ -123,6 +126,10 @@ def process_audio(filepath):
         # 4. Save results
         result = {
             "source_file": os.path.basename(filepath),
+            "transcription_provider": TRANSCRIPTION_PROVIDER,
+            "transcription_model": whisper_model,
+            "summarization_provider": SUMMARIZATION_PROVIDER,
+            "summarization_model": llm_model,
             "transcript": transcription_text,
             "summary": summary,
             "processed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -139,11 +146,13 @@ def process_audio(filepath):
 
     except Exception as e:
         logging.error(f"Error processing {filepath}: {e}")
-        # Move the failed file to an error directory for manual inspection
         os.makedirs(ERROR_DIR, exist_ok=True)
         error_path = os.path.join(ERROR_DIR, os.path.basename(filepath))
-        os.rename(filepath, error_path)
-        logging.info(f"Moved failed file to {error_path}")
+        try:
+            os.rename(filepath, error_path)
+            logging.info(f"Moved failed file to {error_path}")
+        except OSError as rename_error:
+            logging.error(f"Could not move failed file to error directory: {rename_error}")
 
     finally:
         # 5. Clean up
@@ -153,15 +162,16 @@ def process_audio(filepath):
             os.remove(wav_file)
         logging.info(f"Cleaned up source files for {os.path.basename(filepath)}.")
 
-
 def main():
-    """
-    Sets up the watchdog observer to monitor the directory for new files.
-    """
-    # Ensure directories exist
-    os.makedirs(WATCH_DIR, exist_ok=True)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    os.makedirs(ERROR_DIR, exist_ok=True)
+    """Sets up the watchdog observer to monitor the directory for new files."""
+    # Ensure essential directories exist
+    for dir_path in [WATCH_DIR, OUTPUT_DIR, ERROR_DIR]:
+        if "/path/to/" in dir_path:
+            logging.error(f"Configuration error: Please update the directory path '{dir_path}' in the script.")
+            exit(1)
+        os.makedirs(dir_path, exist_ok=True)
+
+    initialize_clients()
 
     event_handler = CallHandler()
     observer = Observer()
@@ -177,7 +187,6 @@ def main():
         observer.stop()
         logging.info("Observer stopped.")
     observer.join()
-
 
 if __name__ == "__main__":
     main()

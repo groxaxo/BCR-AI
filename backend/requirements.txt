@@ -1,0 +1,4 @@
+# Python dependencies for the Automated Call Transcription and Processing Pipeline
+
+openai
+watchdog # For monitoring the file system for new recordings
