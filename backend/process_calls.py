@@ -8,14 +8,22 @@ import openai
 import logging
 
 # --- Configuration ---
-# Directory to watch for incoming call recordings.
+# IMPORTANT: Please update the following directory paths to match your environment.
+# ---
+# Directory where new call recordings are initially received.
 # This should match the DEST_DIR in the push_recording.sh script.
-WATCH_DIR = "/path/to/server/incoming-calls"
+INCOMING_DIR = "/path/to/server/incoming-calls"
 
-# Directory to store the processed JSON files.
+# Directory where recordings are moved to await user approval.
+PROPOSED_DIR = "/path/to/server/proposed"
+
+# Directory where users move recordings to trigger processing.
+APPROVED_DIR = "/path/to/server/approved"
+
+# Directory to store the final processed JSON files.
 OUTPUT_DIR = "/path/to/server/processed"
 
-# Directory to log errors.
+# Directory to move files that fail during processing.
 ERROR_DIR = "/path/to/server/errors"
 
 # API endpoint for the self-hosted Whisper model.
@@ -46,23 +54,41 @@ except Exception as e:
     exit(1)
 
 
-class CallHandler(FileSystemEventHandler):
+class ProposalHandler(FileSystemEventHandler):
     """
-    Handles file system events for new call recordings.
+    Handles new files in the INCOMING_DIR, moving them to the PROPOSED_DIR.
     """
     def on_created(self, event):
-        """
-        Called when a file or directory is created.
-        """
         if event.is_directory:
             return
 
-        # Wait a moment to ensure the file is fully written
-        time.sleep(2)
+        time.sleep(2)  # Wait for the file to be fully written
+
+        source_path = event.src_path
+        filename = os.path.basename(source_path)
+        dest_path = os.path.join(PROPOSED_DIR, filename)
+
+        try:
+            os.rename(source_path, dest_path)
+            logging.info(f"PROPOSAL: New file '{filename}' moved to '{PROPOSED_DIR}' for approval.")
+            logging.info(f"To approve, move it to: '{APPROVED_DIR}'")
+        except Exception as e:
+            logging.error(f"Failed to move '{filename}' to PROPOSED_DIR: {e}")
+
+
+class ExecutionHandler(FileSystemEventHandler):
+    """
+    Handles new files in the APPROVED_DIR, triggering the main processing pipeline.
+    """
+    def on_created(self, event):
+        if event.is_directory:
+            return
+
+        time.sleep(1) # A small delay
 
         filepath = event.src_path
-        logging.info(f"New file detected: {filepath}")
-        process_audio(filepath)
+        logging.info(f"APPROVAL RECEIVED: New file '{os.path.basename(filepath)}' detected in '{APPROVED_DIR}'.")
+        execute_processing(filepath)
 
 
 def preprocess_audio(input_path):
@@ -82,9 +108,9 @@ def preprocess_audio(input_path):
         return None
 
 
-def process_audio(filepath):
+def execute_processing(filepath):
     """
-    The main processing pipeline for a single audio file.
+    The main processing pipeline for a single (approved) audio file.
     1. Preprocesses the audio file.
     2. Transcribes the audio using Whisper.
     3. Summarizes the transcript using a vLLM.
@@ -156,27 +182,36 @@ def process_audio(filepath):
 
 def main():
     """
-    Sets up the watchdog observer to monitor the directory for new files.
+    Sets up watchdog observers to monitor directories for the proposal and approval workflow.
     """
-    # Ensure directories exist
-    os.makedirs(WATCH_DIR, exist_ok=True)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    os.makedirs(ERROR_DIR, exist_ok=True)
+    # Ensure all directories exist
+    for path in [INCOMING_DIR, PROPOSED_DIR, APPROVED_DIR, OUTPUT_DIR, ERROR_DIR]:
+        os.makedirs(path, exist_ok=True)
 
-    event_handler = CallHandler()
-    observer = Observer()
-    observer.schedule(event_handler, WATCH_DIR, recursive=False)
-    observer.start()
+    # --- Set up Proposal Watcher ---
+    proposal_handler = ProposalHandler()
+    proposal_observer = Observer()
+    proposal_observer.schedule(proposal_handler, INCOMING_DIR, recursive=False)
+    proposal_observer.start()
+    logging.info(f"Watching for new files in: {INCOMING_DIR}")
 
-    logging.info(f"Monitoring directory for new calls: {WATCH_DIR}")
+    # --- Set up Execution Watcher ---
+    execution_handler = ExecutionHandler()
+    execution_observer = Observer()
+    execution_observer.schedule(execution_handler, APPROVED_DIR, recursive=False)
+    execution_observer.start()
+    logging.info(f"Watching for approved files in: {APPROVED_DIR}")
 
     try:
         while True:
             time.sleep(5)
     except KeyboardInterrupt:
-        observer.stop()
-        logging.info("Observer stopped.")
-    observer.join()
+        proposal_observer.stop()
+        execution_observer.stop()
+        logging.info("Observers stopped.")
+
+    proposal_observer.join()
+    execution_observer.join()
 
 
 if __name__ == "__main__":
